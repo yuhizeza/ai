@@ -1,7 +1,4 @@
-from pathlib import Path
-import zipfile, textwrap, ast
 
-app_code = r'''
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -943,24 +940,3 @@ else:
 
 st.divider()
 st.caption("규칙 기반 1차 채점 도구입니다. 새 동의어나 창의적 답안은 교사가 최종 확인해야 합니다.")
-'''
-
-requirements = "streamlit>=1.35,<2.0\n"
-
-base = Path("/mnt/data/essay_grader_fixed")
-base.mkdir(exist_ok=True)
-
-app_path = base / "app.py"
-req_path = base / "requirements.txt"
-app_path.write_text(app_code, encoding="utf-8")
-req_path.write_text(requirements, encoding="utf-8")
-
-# 문법 검사
-ast.parse(app_code)
-
-zip_path = Path("/mnt/data/essay_grader_fixed.zip")
-with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-    z.write(app_path, arcname="app.py")
-    z.write(req_path, arcname="requirements.txt")
-
-print(zip_path)
