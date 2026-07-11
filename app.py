@@ -1,25 +1,170 @@
 from pathlib import Path
-import zipfile
-import textwrap
+import zipfile, textwrap, ast
 
-app_path = Path("/mnt/data/essay_grader_streamlit/app.py")
-code = app_path.read_text(encoding="utf-8")
+app_code = r'''
+import re
+import unicodedata
+from dataclasses import dataclass
+from typing import Dict, List, Set, Tuple, Optional
 
-marker = "# =========================================================\n# Streamlit UI\n# =========================================================\n"
-head = code.split(marker)[0]
+import streamlit as st
 
-new_ui = r'''
+
 # =========================================================
-# 화면에 제시할 지문·문항·조건
+# 공통 유틸리티
 # =========================================================
 
-DISPLAY_CONTENT = {
+METHODS = ["정의", "예시", "인과", "분석", "비교와 대조", "분류와 구분"]
+
+METHOD_ALIASES = {
+    "정의": {"정의", "뜻", "개념"},
+    "예시": {"예시", "예", "사례"},
+    "인과": {"인과", "원인과 결과", "원인 결과"},
+    "분석": {"분석", "요소", "구성"},
+    "비교와 대조": {"비교와 대조", "비교대조", "비교", "대조"},
+    "분류와 구분": {"분류와 구분", "분류구분", "분류", "구분"},
+}
+
+
+def normalize(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text or "")
+    text = text.lower().strip()
+    text = re.sub(r"[“”‘’\"']", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def compact(text: str) -> str:
+    return re.sub(r"\s+", "", normalize(text))
+
+
+def contains_any(text: str, expressions: Set[str] | List[str]) -> bool:
+    t = compact(text)
+    return any(compact(x) in t for x in expressions)
+
+
+def count_groups(text: str, groups: List[Set[str]]) -> int:
+    return sum(1 for group in groups if contains_any(text, group))
+
+
+def extract_declared_method(text: str) -> Optional[str]:
+    candidates = re.findall(r"\(([^()]*)\)", normalize(text))
+    for candidate in reversed(candidates):
+        for canonical, aliases in METHOD_ALIASES.items():
+            if contains_any(candidate, aliases):
+                return canonical
+    return None
+
+
+def remove_method_label(text: str) -> str:
+    return re.sub(r"\([^()]*\)\s*$", "", text or "").strip()
+
+
+def contradiction_found(text: str, contradictions: List[Set[str]]) -> Tuple[bool, str]:
+    for group in contradictions:
+        if contains_any(text, group):
+            return True, sorted(group)[0]
+    return False, ""
+
+
+# =========================================================
+# 설명 방법 탐지
+# =========================================================
+
+def detect_definition(sentence: str) -> bool:
+    s = normalize(sentence)
+    patterns = [
+        r".+(?:이란|란)\s+.+(?:말한다|뜻한다|이다|현상이다|것이다)",
+        r".+(?:은|는)\s+.+(?:을|를)\s+말한다",
+        r".+(?:은|는)\s+.+(?:인|하는)\s+(?:현상|전기|작품|방법|과제)이다",
+    ]
+    return any(re.search(p, s) for p in patterns)
+
+
+def detect_example(sentence: str) -> bool:
+    s = normalize(sentence)
+    markers = {"예를 들어", "가령", "대표적으로", "예로", "사례로"}
+    concrete = {
+        "커피숍", "도서관", "공부 모임", "피겨 스케이팅", "올림픽",
+        "폭포", "저수지", "댐", "수조", "에드몽 드 벨라미"
+    }
+    return contains_any(s, markers) or contains_any(s, concrete)
+
+
+def detect_cause_effect(sentence: str) -> bool:
+    s = normalize(sentence)
+    causes = {"때문에", "그러므로", "따라서", "그래서", "결과적으로", "므로", "해서", "하여"}
+    results = {
+        "좋다", "효율적", "위험하지", "예술로 보기 어렵", "예술로 볼 수",
+        "강조", "전달", "드러", "감동", "울림", "집중해야"
+    }
+    return contains_any(s, causes) and contains_any(s, results)
+
+
+def detect_analysis(sentence: str) -> bool:
+    s = normalize(sentence)
+    components = {
+        "감정", "철학", "경험", "관점", "환경", "전압", "전하", "위험성",
+        "혼자", "집중", "연습", "익숙"
+    }
+    component_count = sum(1 for c in components if contains_any(s, {c}))
+    structure = contains_any(s, {"이루어", "구성", "요소", "부분", "에는", "특징은", "방법에는"})
+    return structure and component_count >= 2
+
+
+def detect_compare(sentence: str) -> bool:
+    s = normalize(sentence)
+    markers = {"반면", "하지만", "그러나", "와 달리", "과 달리", "차이", "공통점", "둘 다", "반대로", "지만"}
+    target_pairs = [
+        ("쉬운 과제", "어려운 과제"),
+        ("실생활 전기", "정전기"),
+        ("인간", "인공 지능"),
+        ("인간의 예술", "인공 지능의 그림"),
+        ("인간 선수", "로봇"),
+    ]
+    has_pair = any(contains_any(s, {a}) and contains_any(s, {b}) for a, b in target_pairs)
+    return has_pair and contains_any(s, markers)
+
+
+def detect_classification(sentence: str) -> bool:
+    s = normalize(sentence)
+    markers = {"나뉘", "나눌 수", "구분", "분류", "묶", "종류"}
+    criteria = {"에 따라", "기준", "여부", "난이도", "창작 주체"}
+    target_pairs = [
+        ("쉬운 과제", "어려운 과제"),
+        ("실생활 전기", "정전기"),
+        ("인간", "인공 지능"),
+    ]
+    has_pair = any(contains_any(s, {a}) and contains_any(s, {b}) for a, b in target_pairs)
+    return contains_any(s, markers) and contains_any(s, criteria) and has_pair
+
+
+METHOD_DETECTORS = {
+    "정의": detect_definition,
+    "예시": detect_example,
+    "인과": detect_cause_effect,
+    "분석": detect_analysis,
+    "비교와 대조": detect_compare,
+    "분류와 구분": detect_classification,
+}
+
+
+def detect_methods(sentence: str) -> Set[str]:
+    body = remove_method_label(sentence)
+    return {name for name, detector in METHOD_DETECTORS.items() if detector(body)}
+
+
+# =========================================================
+# 데이터
+# =========================================================
+
+SETS = {
     "1세트: 사회적 촉진·억제": {
         "passage_title": "사회적 촉진과 사회적 억제를 활용한 학습 방법",
         "passage": """
-**기자:** 심리학 용어인 ‘사회적 촉진’과 ‘사회적 억제’를 일상생활, 특히 우리의 학습에 어떻게 적용할 수 있을까요?
+**기자:** 심리학 용어인 ‘사회적 촉진’과 ‘사회적 억제’를 학습에 어떻게 적용할 수 있을까요?
 
-**전문가:** 이 두 가지 개념을 알면 상황에 맞춰 유용하게 활용할 수 있습니다. 비교적 쉬운 취미 생활이나 큰 노력을 들일 필요가 없는 과제는 집에서 혼자 하는 것보다 커피숍이나 도서관에서 하거나, 친숙하고 좋아하는 과목이라면 공부 모임을 만들어 다른 사람들과 함께 공부하는 것이 더 효율적일 수 있습니다.
+**전문가:** 비교적 쉬운 취미 생활이나 큰 노력을 들일 필요가 없는 과제는 집에서 혼자 하는 것보다 커피숍이나 도서관에서 하거나, 친숙하고 좋아하는 과목이라면 공부 모임을 만들어 다른 사람들과 함께 공부하는 것이 더 효율적일 수 있습니다.
 
 반면 지나치게 어렵거나 도전이 필요한 과제는 충분히 연습하며 익숙해질 때까지 차분하게 혼자 집중하는 시간을 가지는 것이 좋습니다.
 """,
@@ -32,14 +177,34 @@ DISPLAY_CONTENT = {
                 ["지나치게 어렵거나 도전이 필요한 과제", "㉡", "㉢"],
             ],
             "guide": [
-                "㉠에는 어떤 특성의 과제인지 씁니다.",
-                "㉡에는 그 과제를 수행하는 환경과 방법을 씁니다.",
-                "㉢에는 해당 심리 현상의 이름을 씁니다.",
+                "㉠: 어떤 특성의 과제인지 씁니다.",
+                "㉡: 그 과제를 수행하는 환경과 방법을 씁니다.",
+                "㉢: 해당 심리 현상의 이름을 씁니다.",
             ],
+            "rules": {
+                "㉠": {
+                    "required_groups": [{"쉬운 과제", "비교적 쉬운 과제", "어렵지 않은 과제", "큰 노력이 필요하지 않은 과제", "큰 노력이 들지 않는 과제"}],
+                    "contradictions": [{"어려운 과제", "복잡한 과제", "도전이 필요한 과제"}],
+                    "model": "비교적 쉽거나 큰 노력을 들일 필요가 없는 과제",
+                },
+                "㉡": {
+                    "required_groups": [
+                        {"혼자", "혼자서", "개별적으로", "다른 사람 없이"},
+                        {"집중", "차분하게", "연습", "반복", "익숙해질 때까지"},
+                    ],
+                    "contradictions": [{"함께", "공부 모임", "여럿이"}],
+                    "model": "충분히 연습하여 익숙해질 때까지 차분하게 혼자 집중함",
+                },
+                "㉢": {
+                    "required_groups": [{"사회적 억제"}],
+                    "contradictions": [{"사회적 촉진"}],
+                    "model": "사회적 억제",
+                },
+            },
         },
         "q2": {
             "title": "서로 다른 설명 방법으로 문장 쓰기",
-            "prompt": "‘과제 난이도에 따른 효율적인 학습 전략’을 설명하는 글의 첫 문장에 이어질 두 문장을 작성하세요.",
+            "prompt": "첫 문장에 이어질 두 문장을 작성하세요.",
             "starter": "과제의 특성과 난이도에 따라 우리의 학습 효율을 높이는 방법은 다르게 적용되어야 한다.",
             "conditions": [
                 "(1), (2)에 문장을 하나씩 작성합니다.",
@@ -48,6 +213,32 @@ DISPLAY_CONTENT = {
                 "설명 방법명을 쓰는 경우 문장 끝에 괄호로 표시합니다.",
             ],
             "hints": "쉬운 과제와 어려운 과제를 어떻게 다르게 해야 하는지 생각해 보세요.",
+            "passage_groups": [
+                {"쉬운 과제", "비교적 쉬운 과제", "친숙한 과목", "좋아하는 과목"},
+                {"함께", "다른 사람", "커피숍", "도서관", "공부 모임"},
+                {"어려운 과제", "도전이 필요한 과제", "복잡한 과제"},
+                {"혼자", "집중", "연습", "익숙해질 때까지", "차분하게"},
+            ],
+            "contradictions": [
+                {"쉬운 과제는 혼자", "쉬운 과제를 혼자"},
+                {"어려운 과제는 함께", "어려운 과제를 함께"},
+            ],
+            "required_conclusion": [
+                {"쉬운 과제", "친숙한 과목"},
+                {"함께", "다른 사람", "커피숍", "도서관", "공부 모임"},
+                {"어려운 과제", "도전이 필요한 과제"},
+                {"혼자", "집중", "연습", "익숙해질 때까지"},
+            ],
+            "models": {
+                "비교와 대조 + 예시": [
+                    "비교적 쉬운 과제는 다른 사람들과 함께하는 것이 효율적이지만, 지나치게 어렵거나 도전이 필요한 과제는 혼자 집중하는 것이 효율적이다. (비교와 대조)",
+                    "예를 들어 친숙하고 좋아하는 과목은 공부 모임을 만들어 다른 사람들과 함께 공부할 수 있다. (예시)",
+                ],
+                "분류와 구분 + 예시": [
+                    "과제는 난이도에 따라 비교적 쉬운 과제와 지나치게 어려운 과제로 나눌 수 있다. (분류와 구분)",
+                    "예를 들어 쉬운 과제는 도서관이나 커피숍에서 하고, 어려운 과제는 혼자 연습할 수 있다. (예시)",
+                ],
+            },
         },
         "q3": {
             "title": "어려운 과제 장면의 영상 기획안 완성하기",
@@ -69,17 +260,41 @@ DISPLAY_CONTENT = {
                 "각 효과에는 앞에서 쓴 요소와의 연결이 있어야 합니다.",
                 "효과의 근거는 반드시 윗글의 내용에서 가져옵니다.",
             ],
+            "visual_element_groups": [
+                {"혼자", "한 학생", "개별적으로"},
+                {"집중", "연습", "반복", "틀린 문제", "다시 확인"},
+            ],
+            "audio_element_groups": [
+                {"조용", "정적", "무음", "말소리 없음", "소리 제거", "잔잔"},
+            ],
+            "visual_effect_groups": [
+                {"혼자", "개별적으로"},
+                {"어려운 과제", "도전이 필요한 과제"},
+                {"집중", "연습", "익숙해질 때까지", "차분하게"},
+            ],
+            "audio_effect_groups": [
+                {"차분", "조용", "방해가 없", "집중"},
+                {"어려운 과제", "도전이 필요한 과제"},
+            ],
+            "contradictions": [
+                {"여럿이 떠들", "친구들과 시끄럽게"},
+                {"기억력이 세 배", "도파민", "뇌파"},
+            ],
+            "models": {
+                "시각 요소": "한 학생이 조용한 공간에서 혼자 어려운 문제를 반복해서 풀고 틀린 문제를 다시 확인하는 모습을 보여 준다.",
+                "시각 효과": "학생이 혼자 반복해서 연습하는 모습을 통해 어려운 과제는 익숙해질 때까지 차분하게 혼자 집중해야 한다는 점을 전달한다.",
+                "청각 요소": "사람들의 말소리와 경쾌한 음악은 없애고, 연필로 문제를 푸는 소리와 책장 넘기는 소리만 작게 들려준다.",
+                "청각 효과": "주변 소리를 줄인 차분한 분위기를 통해 어려운 과제는 방해를 받지 않고 혼자 집중해서 연습하는 것이 좋다는 점을 강조한다.",
+            },
         },
     },
 
     "2세트: 정전기": {
         "passage_title": "정전기의 뜻과 특징",
         "passage": """
-**기자:** 겨울철 불청객인 ‘정전기’란 정확히 무엇인가요?
+정전기란 전하가 정지 상태로 있어 그 분포가 시간적으로 변화하지 않는 전기와 그로 인한 전기 현상을 말합니다. 쉽게 말하면 흐르지 않고 머물러 있는 전기입니다.
 
-**전문가:** 정전기란 전하가 정지 상태로 있어 그 분포가 시간적으로 변화하지 않는 전기와 그로 인한 전기 현상을 말합니다. 쉽게 말하면 흐르지 않고 머물러 있는 전기입니다.
-
-우리가 실생활에서 쓰는 전기가 ‘흐르는 물’이라면, 정전기는 ‘높은 곳에 고여 있는 물’이라고 할 수 있습니다. 정전기의 전압은 매우 높지만 전하가 이동하지 않고 머물러 있어 위험하지는 않습니다. 어마어마하게 높은 곳에 고여 있는 물이 떨어지지 않고 있어서 별 피해가 없는 것과 같습니다.
+우리가 실생활에서 쓰는 전기가 ‘흐르는 물’이라면, 정전기는 ‘높은 곳에 고여 있는 물’이라고 할 수 있습니다. 정전기의 전압은 매우 높지만 전하가 이동하지 않고 머물러 있어 위험하지는 않습니다.
 """,
         "q1": {
             "title": "정전기의 특징을 표로 정리하기",
@@ -90,23 +305,72 @@ DISPLAY_CONTENT = {
                 ["정전기", "㉠", "㉡", "㉢"],
             ],
             "guide": [
-                "㉠에는 정전기를 비유한 물의 상태를 씁니다.",
-                "㉡에는 전하가 어떤 상태인지 씁니다.",
-                "㉢에는 위험성을 씁니다.",
+                "㉠: 정전기를 비유한 물의 상태를 씁니다.",
+                "㉡: 전하가 어떤 상태인지 씁니다.",
+                "㉢: 위험성을 씁니다.",
             ],
+            "rules": {
+                "㉠": {
+                    "required_groups": [
+                        {"높은 곳", "높은 위치", "위쪽"},
+                        {"고여 있는 물", "머물러 있는 물", "흐르지 않는 물", "저장된 물"},
+                    ],
+                    "contradictions": [{"흐르는 물", "폭포", "떨어지는 물"}],
+                    "model": "높은 곳에 고여 있는 물",
+                },
+                "㉡": {
+                    "required_groups": [
+                        {"전하"},
+                        {"이동하지 않", "머물", "정지 상태", "흐르지 않", "제자리에"},
+                    ],
+                    "contradictions": [{"전하가 빠르게 이동", "전하가 흐름"}],
+                    "model": "전하가 이동하지 않고 머물러 있음",
+                },
+                "㉢": {
+                    "required_groups": [{"위험하지 않", "피해가 없", "위험성이 낮", "감전 위험이 없"}],
+                    "contradictions": [{"매우 위험", "감전 위험이 크"}, {"전압이 낮아서"}],
+                    "model": "전압은 높지만 전하가 이동하지 않아 위험하지 않음",
+                },
+            },
         },
         "q2": {
             "title": "정전기의 특징을 두 가지 설명 방법으로 쓰기",
-            "prompt": "‘정전기의 특징’을 설명하는 글의 첫 문장에 이어질 두 문장을 작성하세요.",
+            "prompt": "첫 문장에 이어질 두 문장을 작성하세요.",
             "starter": "겨울철에 흔히 겪는 정전기는 우리가 평소 집에서 사용하는 전기와는 다른 뚜렷한 특징이 있다.",
             "conditions": [
                 "(1), (2)에 문장을 하나씩 작성합니다.",
                 "두 문장은 서로 다른 설명 방법을 사용해야 합니다.",
                 "윗글에 제시된 내용만 활용합니다.",
                 "두 문장이 의미상 이어지도록 씁니다.",
-                "설명 방법명을 쓰는 경우 문장 끝에 괄호로 표시합니다.",
             ],
             "hints": "정전기의 뜻, 실생활 전기와의 차이, 전하의 상태, 위험성을 활용할 수 있습니다.",
+            "passage_groups": [
+                {"정전기", "전하"},
+                {"정지 상태", "이동하지 않", "머물", "흐르지 않"},
+                {"실생활 전기", "흐르는 물"},
+                {"높은 곳에 고여 있는 물", "고여 있는 물"},
+                {"위험하지 않", "피해가 없"},
+            ],
+            "contradictions": [
+                {"전압이 낮아서", "전압이 낮기 때문에"},
+                {"전하가 빠르게 이동", "전하가 많이 흐름"},
+                {"겨울이 건조해서", "수분이 부족해서"},
+            ],
+            "required_conclusion": [
+                {"정전기"},
+                {"정지 상태", "이동하지 않", "머물", "흐르지 않"},
+                {"위험하지 않", "실생활 전기와 다르", "차이"},
+            ],
+            "models": {
+                "정의 + 비교와 대조": [
+                    "정전기란 전하가 정지 상태로 있어 그 분포가 시간적으로 변하지 않는 전기와 그로 인한 전기 현상을 말한다. (정의)",
+                    "실생활에서 사용하는 전기는 전하가 이동하지만, 정전기는 전하가 이동하지 않고 머물러 있다는 차이가 있다. (비교와 대조)",
+                ],
+                "비교와 대조 + 인과": [
+                    "실생활 전기가 흐르는 물과 같다면 정전기는 높은 곳에 고여 있는 물과 같다. (비교와 대조)",
+                    "정전기는 전하가 이동하지 않기 때문에 전압이 매우 높아도 위험하지 않다. (인과)",
+                ],
+            },
         },
         "q3": {
             "title": "정전기 장면의 영상 기획안 완성하기",
@@ -128,14 +392,38 @@ DISPLAY_CONTENT = {
                 "각 효과에는 앞에서 쓴 요소와의 연결이 있어야 합니다.",
                 "효과의 근거는 반드시 윗글에서 가져옵니다.",
             ],
+            "visual_element_groups": [
+                {"높은 곳", "높은 절벽", "댐", "저수지", "높은 수조"},
+                {"고여", "흐르지 않", "떨어지지 않", "정지"},
+            ],
+            "audio_element_groups": [
+                {"정적", "무음", "고요", "잔잔", "거센 물소리 없음", "폭포 소리 제거"},
+            ],
+            "visual_effect_groups": [
+                {"전하"},
+                {"이동하지 않", "머물", "정지 상태"},
+                {"위험하지 않", "피해가 없", "전압이 높아도"},
+            ],
+            "audio_effect_groups": [
+                {"전하"},
+                {"이동하지 않", "머물", "정지 상태"},
+            ],
+            "contradictions": [
+                {"폭포처럼 쏟아", "물이 세차게 흐르"},
+                {"전압이 낮아서", "전압을 낮춘다"},
+            ],
+            "models": {
+                "시각 요소": "높은 절벽 위의 저수지에 많은 물이 고여 있지만 아래로 흐르거나 떨어지지 않는 모습을 보여 준다.",
+                "시각 효과": "높은 곳에 물이 고여 움직이지 않는 모습을 통해 정전기는 전압이 높아도 전하가 이동하지 않고 머물러 있어 위험하지 않다는 점을 전달한다.",
+                "청각 요소": "폭포처럼 물이 거세게 흐르는 소리는 없애고, 아주 약한 물결 소리만 들려준다.",
+                "청각 효과": "거센 물소리가 없는 고요한 상태를 통해 정전기의 전하가 이동하지 않고 머물러 있다는 점을 강조한다.",
+            },
         },
     },
 
     "3세트: 인공 지능 그림": {
         "passage_title": "인공 지능이 그린 그림의 예술적 가치",
         "passage": """
-생성형 인공 지능이 그린 대표적 작품으로 「에드몽 드 벨라미」가 있습니다. 이 그림은 많은 초상화 자료를 토대로 알고리즘과 데이터를 사용해 만들어졌고 높은 가격에 판매되었습니다.
-
 우리가 올림픽에 열광하는 이유는 선수들의 노력과 열정을 알기 때문입니다. 반면 로봇이 한 번의 실수 없이 완벽하게 피겨 스케이팅을 하더라도 우리의 마음을 울리지는 못합니다.
 
 인간의 작품에는 작가의 감정과 철학, 삶의 경험, 세상을 바라보는 관점, 주변 환경이 종합적으로 담겨 있으므로 예술로 볼 수 있습니다. 하지만 인공 지능은 감정을 느끼지 못하고 독자적인 철학이나 이야기가 없기 때문에 그 그림을 인간의 예술과 같다고 보기는 어렵습니다.
@@ -151,10 +439,37 @@ DISPLAY_CONTENT = {
                 ["인공 지능의 예술", "㉠", "㉡", "㉢"],
             ],
             "guide": [
-                "㉠에는 인공 지능 그림과 대응되는 로봇 경기의 모습을 씁니다.",
-                "㉡에는 예술로 보기 어려운 근거와 결론을 함께 씁니다.",
-                "㉢에는 인공 지능 그림이 지닌 가치나 의미를 씁니다.",
+                "㉠: 인공 지능 그림과 대응되는 로봇 경기의 모습을 씁니다.",
+                "㉡: 예술로 보기 어려운 근거와 결론을 함께 씁니다.",
+                "㉢: 인공 지능 그림이 지닌 가치나 의미를 씁니다.",
             ],
+            "rules": {
+                "㉠": {
+                    "required_groups": [
+                        {"로봇"},
+                        {"완벽", "한 번의 실수 없이"},
+                        {"피겨 스케이팅", "경기"},
+                    ],
+                    "contradictions": [{"인간 선수"}],
+                    "model": "한 번의 실수 없이 완벽하게 피겨 스케이팅을 하는 로봇",
+                },
+                "㉡": {
+                    "required_groups": [
+                        {"감정이 없", "감정을 느끼지 못", "철학이 없", "이야기가 없", "경험이 없", "관점이 없"},
+                        {"예술로 보기 어렵", "인간의 예술과 같다고 보기 어렵", "예술로 인정하기 어렵"},
+                    ],
+                    "contradictions": [{"기술이 부족해서"}, {"가격이 낮아서"}, {"아무 가치도 없"}],
+                    "model": "감정도 느끼지 못하고 독자적인 철학이나 이야기가 없으므로 예술로 보기 어렵다.",
+                },
+                "㉢": {
+                    "required_groups": [
+                        {"미술계에 변화", "미술계의 변화", "예술의 범주를 확장", "예술의 범위를 넓", "새로운 예술 가능성"},
+                        {"가치", "의미", "상징적"},
+                    ],
+                    "contradictions": [{"아무 가치도 없", "가치가 전혀 없"}, {"인간 예술보다 우월", "인간을 완전히 대체"}],
+                    "model": "기존 미술계에 변화를 가져오고 예술의 범주를 확장할 수 있다는 상징적 가치가 있다.",
+                },
+            },
         },
         "q2": {
             "title": "인공 지능 그림을 바라보는 시각 설명하기",
@@ -165,9 +480,38 @@ DISPLAY_CONTENT = {
                 "두 문장은 서로 다른 설명 방법을 사용해야 합니다.",
                 "윗글에 제시된 내용만 활용합니다.",
                 "두 문장이 의미상 이어지도록 씁니다.",
-                "설명 방법명을 쓰는 경우 문장 끝에 괄호로 표시합니다.",
             ],
             "hints": "인간 예술과 인공 지능 그림의 차이, 예술로 보기 어려운 이유, 상징적 가치를 활용할 수 있습니다.",
+            "passage_groups": [
+                {"인간의 예술", "인간의 작품", "작가"},
+                {"감정", "철학", "경험", "관점", "환경"},
+                {"인공 지능", "인공지능"},
+                {"감정이 없", "철학이 없", "이야기가 없", "경험이 없"},
+                {"예술로 보기 어렵", "인간의 예술과 같다고 보기 어렵"},
+                {"미술계에 변화", "예술의 범주를 확장", "상징적 가치"},
+            ],
+            "contradictions": [
+                {"인공 지능은 감정이 풍부"},
+                {"인공 지능은 독자적인 철학이 있"},
+                {"아무 가치도 없", "가치가 전혀 없"},
+                {"가격이 비싸서 예술"},
+            ],
+            "required_conclusion": [
+                {"인간의 작품", "인간의 예술", "작가"},
+                {"감정", "철학", "경험", "관점", "환경"},
+                {"인공 지능", "인공지능"},
+                {"예술로 보기 어렵", "인간의 예술과 같다고 보기 어렵", "감동을 주지 못"},
+            ],
+            "models": {
+                "비교와 대조 + 인과": [
+                    "인간의 예술에는 작가의 감정과 철학, 삶의 경험과 관점이 담겨 있지만, 인공 지능이 그린 그림에는 이러한 요소가 없다는 차이가 있다. (비교와 대조)",
+                    "인공 지능은 감정을 느끼지 못하고 독자적인 철학이나 이야기가 없기 때문에 그 그림을 인간의 예술과 같다고 보기는 어렵다. (인과)",
+                ],
+                "예시 + 비교와 대조": [
+                    "예를 들어 인간 선수의 노력과 열정이 담긴 경기는 감동을 주지만 로봇의 완벽한 경기는 같은 감동을 주지 못한다. (예시)",
+                    "이와 마찬가지로 인간의 작품에는 감정과 경험이 담겨 있지만 인공 지능의 그림에는 그러한 요소가 없다. (비교와 대조)",
+                ],
+            },
         },
         "q3": {
             "title": "인간 예술의 특성을 보여 주는 영상 기획안 완성하기",
@@ -189,30 +533,211 @@ DISPLAY_CONTENT = {
                 "각 효과에는 앞에서 쓴 요소와의 연결이 있어야 합니다.",
                 "효과의 근거는 반드시 윗글에서 가져옵니다.",
             ],
+            "visual_element_groups": [
+                {"화가", "작가", "인간"},
+                {"감정", "철학", "경험", "관점", "환경", "과거", "삶"},
+            ],
+            "audio_element_groups": [
+                {"독백", "내레이션", "붓질", "숨소리", "심장 박동", "감정적인 음악", "현악기"},
+            ],
+            "visual_effect_groups": [
+                {"작가", "화가", "인간"},
+                {"감정", "철학", "경험", "관점", "환경"},
+                {"감동", "마음을 울", "울림", "예술"},
+            ],
+            "audio_effect_groups": [
+                {"감정", "경험", "생각", "철학", "노력"},
+                {"감동", "마음을 울", "울림", "예술"},
+            ],
+            "contradictions": [
+                {"로봇의 완벽한 기술만", "기계음만"},
+                {"그림 실력이 향상", "집중력이 높아짐"},
+                {"아무 가치도 없"},
+            ],
+            "models": {
+                "시각 요소": "한 화가가 자신의 삶의 경험과 감정을 떠올리며 그림을 그리고, 완성된 작품을 본 사람들이 감동하는 모습을 보여 준다.",
+                "시각 효과": "작가의 경험과 감정이 작품에 담기고 그 작품이 감상자의 마음을 울리는 모습을 통해 인간 예술의 특성을 전달한다.",
+                "청각 요소": "작가가 자신의 경험과 생각을 말하는 독백과 붓질 소리를 들려주고, 작품이 완성될 때 감정이 풍부한 음악을 사용한다.",
+                "청각 효과": "독백과 붓질 소리를 통해 작가의 경험과 생각이 작품에 담기는 과정을 보여 주고, 감정적인 음악을 통해 인간의 예술이 감상자에게 울림을 준다는 점을 강조한다.",
+            },
         },
     },
 }
 
 
-def render_passage_card(content: Dict):
+# =========================================================
+# 채점 함수
+# =========================================================
+
+@dataclass
+class GradeResult:
+    passed: bool
+    score: float
+    max_score: float
+    reasons: List[str]
+
+
+def grade_q1_answer(answer: str, rule: Dict) -> GradeResult:
+    if not normalize(answer):
+        return GradeResult(False, 0, 1, ["답안이 비어 있습니다."])
+
+    found, token = contradiction_found(answer, rule.get("contradictions", []))
+    if found:
+        return GradeResult(False, 0, 1, [f"지문과 반대되거나 다른 개념의 특성이 포함되었습니다: ‘{token}’"])
+
+    matched = count_groups(answer, rule["required_groups"])
+    if matched == len(rule["required_groups"]):
+        return GradeResult(True, 1, 1, ["필수 의미 요소를 모두 포함했습니다."])
+
+    return GradeResult(False, 0, 1, [f"필수 의미 요소가 부족합니다: {matched}/{len(rule['required_groups'])}"])
+
+
+def passage_based(sentence: str, passage_groups: List[Set[str]], contradictions: List[Set[str]]) -> Tuple[bool, List[str]]:
+    found, token = contradiction_found(sentence, contradictions)
+    if found:
+        return False, [f"지문 밖 정보 또는 반대 내용이 포함되었습니다: ‘{token}’"]
+
+    matched = count_groups(sentence, passage_groups)
+    if matched < 1:
+        return False, ["지문 핵심 개념이 확인되지 않습니다."]
+
+    return True, [f"지문 핵심 개념군 {matched}개와 일치합니다."]
+
+
+def grade_q2(answer1: str, answer2: str, rule: Dict) -> GradeResult:
+    answers = [answer1, answer2]
+    if any(not normalize(a) for a in answers):
+        return GradeResult(False, 0, 4, ["두 문장을 모두 작성해야 합니다."])
+
+    reasons: List[str] = []
+    chosen_methods: List[str] = []
+
+    priority = ["분류와 구분", "비교와 대조", "인과", "정의", "분석", "예시"]
+
+    for idx, answer in enumerate(answers, start=1):
+        declared = extract_declared_method(answer)
+        detected = detect_methods(answer)
+
+        if declared:
+            if declared not in detected:
+                return GradeResult(
+                    False,
+                    0,
+                    4,
+                    [f"({idx}) 괄호 속 ‘{declared}’와 실제 문장 방식이 일치하지 않습니다. 감지된 방식: {', '.join(sorted(detected)) or '없음'}"],
+                )
+            chosen_methods.append(declared)
+        else:
+            if not detected:
+                return GradeResult(False, 0, 4, [f"({idx}) 설명 방법의 의미 구조가 확인되지 않습니다."])
+            chosen_methods.append(next(m for m in priority if m in detected))
+
+        ok, sub_reasons = passage_based(answer, rule["passage_groups"], rule["contradictions"])
+        reasons.extend([f"({idx}) {r}" for r in sub_reasons])
+        if not ok:
+            return GradeResult(False, 0, 4, reasons)
+
+    if chosen_methods[0] == chosen_methods[1]:
+        return GradeResult(False, 0, 4, [f"두 문장에 같은 설명 방법 ‘{chosen_methods[0]}’이 사용되었습니다."])
+
+    combined = " ".join(answers)
+    conclusion_match = count_groups(combined, rule["required_conclusion"])
+    if conclusion_match < len(rule["required_conclusion"]):
+        reasons.append(f"요구된 결론 방향의 핵심 요소가 부족합니다: {conclusion_match}/{len(rule['required_conclusion'])}")
+        return GradeResult(False, 0, 4, reasons)
+
+    reasons.append(f"서로 다른 설명 방법을 사용했습니다: {chosen_methods[0]} / {chosen_methods[1]}")
+    reasons.append("지문 내용과 결론 방향을 충족했습니다.")
+    return GradeResult(True, 4, 4, reasons)
+
+
+def element_effect_connection(element: str, effect: str) -> bool:
+    pairs = [
+        ({"혼자", "한 학생", "개별"}, {"혼자", "개별", "집중"}),
+        ({"조용", "정적", "무음", "잔잔"}, {"차분", "조용", "방해", "집중", "정지"}),
+        ({"고여", "흐르지 않", "정지", "떨어지지 않"}, {"이동하지 않", "머물", "정지"}),
+        ({"화가", "작가", "경험", "감정", "과거"}, {"작가", "감정", "경험", "철학", "관점", "예술"}),
+        ({"독백", "붓질", "숨소리", "감정적인 음악"}, {"감정", "경험", "생각", "울림", "감동"}),
+    ]
+    return any(contains_any(element, a) and contains_any(effect, b) for a, b in pairs)
+
+
+def grade_q3(visual_element: str, visual_effect: str, audio_element: str, audio_effect: str, rule: Dict) -> GradeResult:
+    answers = [visual_element, visual_effect, audio_element, audio_effect]
+    if any(not normalize(a) for a in answers):
+        return GradeResult(False, 0, 6, ["시각 요소·시각 효과·청각 요소·청각 효과를 모두 작성해야 합니다."])
+
+    for answer in answers:
+        found, token = contradiction_found(answer, rule["contradictions"])
+        if found:
+            return GradeResult(False, 0, 6, [f"지문과 반대되거나 다른 개념의 특성이 포함되었습니다: ‘{token}’"])
+
+    score = 0
+    reasons: List[str] = []
+
+    visual_element_ok = count_groups(visual_element, rule["visual_element_groups"]) == len(rule["visual_element_groups"])
+    if visual_element_ok:
+        score += 1
+        reasons.append("시각 요소: 지문 핵심 특성을 반영함 (1/1)")
+    else:
+        reasons.append("시각 요소: 지문 핵심 특성이 부족함 (0/1)")
+
+    visual_connected = element_effect_connection(visual_element, visual_effect)
+    if visual_connected:
+        score += 1
+        reasons.append("시각 효과: 앞의 시각 요소와 연결됨 (1/1)")
+    else:
+        reasons.append("시각 효과: 앞의 시각 요소와의 연결이 부족함 (0/1)")
+
+    visual_evidence = count_groups(visual_effect, rule["visual_effect_groups"]) == len(rule["visual_effect_groups"])
+    if visual_evidence:
+        score += 1
+        reasons.append("시각 효과: 본문 근거와 결론 방향을 포함함 (1/1)")
+    else:
+        reasons.append("시각 효과: 본문 근거 또는 결론 방향이 부족함 (0/1)")
+
+    audio_element_ok = count_groups(audio_element, rule["audio_element_groups"]) == len(rule["audio_element_groups"])
+    if audio_element_ok:
+        score += 1
+        reasons.append("청각 요소: 지문 핵심 특성을 반영함 (1/1)")
+    else:
+        reasons.append("청각 요소: 지문 핵심 특성이 부족함 (0/1)")
+
+    audio_connected = element_effect_connection(audio_element, audio_effect)
+    if audio_connected:
+        score += 1
+        reasons.append("청각 효과: 앞의 청각 요소와 연결됨 (1/1)")
+    else:
+        reasons.append("청각 효과: 앞의 청각 요소와의 연결이 부족함 (0/1)")
+
+    audio_evidence = count_groups(audio_effect, rule["audio_effect_groups"]) == len(rule["audio_effect_groups"])
+    if audio_evidence:
+        score += 1
+        reasons.append("청각 효과: 본문 근거와 결론 방향을 포함함 (1/1)")
+    else:
+        reasons.append("청각 효과: 본문 근거 또는 결론 방향이 부족함 (0/1)")
+
+    return GradeResult(score == 6, score, 6, reasons)
+
+
+# =========================================================
+# UI 헬퍼
+# =========================================================
+
+def render_passage(content: Dict) -> None:
     st.markdown(f"### 📖 읽을 글: {content['passage_title']}")
     with st.container(border=True):
         st.markdown(content["passage"])
 
 
-def render_question_header(question: Dict):
-    st.markdown(f"## {question['title']}")
-    st.info(question["prompt"])
-
-
-def render_conditions(items: List[str]):
+def render_conditions(items: List[str]) -> None:
     with st.container(border=True):
         st.markdown("#### ✅ 작성 조건")
         for item in items:
             st.markdown(f"- {item}")
 
 
-def render_answer_feedback(title: str, result: GradeResult, model: str | None = None):
+def render_result(title: str, result: GradeResult, model: Optional[str] = None) -> None:
     with st.container(border=True):
         if result.passed:
             st.success(f"{title}: 통과 ({result.score:.0f}/{result.max_score:.0f})")
@@ -225,54 +750,45 @@ def render_answer_feedback(title: str, result: GradeResult, model: str | None = 
 
 
 # =========================================================
-# Streamlit UI
+# Streamlit 화면
 # =========================================================
 
 st.set_page_config(page_title="서·논술형 자동 채점기", page_icon="📝", layout="wide")
 
-st.markdown("""
-<style>
-.block-container {max-width: 1180px; padding-top: 2rem; padding-bottom: 4rem;}
-[data-testid="stSidebar"] {min-width: 300px; max-width: 300px;}
-div[data-testid="stTextArea"] textarea {font-size: 1.02rem; line-height: 1.65;}
-.question-label {font-weight: 700; margin-bottom: .2rem;}
-.small-guide {color: #666; font-size: .95rem;}
-</style>
-""", unsafe_allow_html=True)
+st.markdown(
+    """
+    <style>
+    .block-container {max-width: 1180px; padding-top: 2rem; padding-bottom: 4rem;}
+    [data-testid="stSidebar"] {min-width: 300px; max-width: 300px;}
+    div[data-testid="stTextArea"] textarea {font-size: 1.02rem; line-height: 1.65;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.title("📝 2회 시험 대비 서·논술형 자동 채점기")
-st.caption(
-    "먼저 글과 문제를 읽고 답을 작성하세요. 채점기는 동의어·유사 표현을 인정하지만, "
-    "오개념·설명 방법 불일치·결론 방향 오류는 잡아냅니다."
-)
+st.caption("글과 문제를 읽고 답을 작성하세요. 동의어·유사 표현은 인정하지만 오개념과 결론 방향 오류는 잡아냅니다.")
 
 with st.sidebar:
     st.header("채점 설정")
     selected_set = st.selectbox("문항 세트", list(SETS.keys()))
-    question_type = st.radio(
+    selected_type = st.radio(
         "문항 유형",
-        ["서·논술형 1: 표 빈칸", "서·논술형 2: 설명 방법", "서·논술형 3: 영상 기획안"]
+        ["서·논술형 1: 표 빈칸", "서·논술형 2: 설명 방법", "서·논술형 3: 영상 기획안"],
     )
     st.divider()
     st.markdown("#### 이용 순서")
     st.markdown("1. 읽을 글 확인\n2. 문제와 조건 확인\n3. 답안 작성\n4. 채점 결과 확인")
-    st.divider()
-    st.info(
-        "새로운 동의어나 창의적인 답안은 자동 채점에서 놓칠 수 있으므로 "
-        "교사가 최종 확인해야 합니다."
-    )
+    st.info("자동 채점은 1차 판단입니다. 창의적인 답안은 교사가 최종 확인해야 합니다.")
 
-config = SETS[selected_set]
-display = DISPLAY_CONTENT[selected_set]
-
-render_passage_card(display)
-
+content = SETS[selected_set]
+render_passage(content)
 st.divider()
 
-if question_type.startswith("서·논술형 1"):
-    q = display["q1"]
-    render_question_header(q)
-
+if selected_type.startswith("서·논술형 1"):
+    q = content["q1"]
+    st.markdown(f"## {q['title']}")
+    st.info(q["prompt"])
     st.markdown("#### 📊 요약 표")
     st.table(q["table"])
 
@@ -281,35 +797,30 @@ if question_type.startswith("서·논술형 1"):
         for item in q["guide"]:
             st.markdown(f"- {item}")
 
-    st.markdown("### 답안 작성")
     cols = st.columns(3)
     answers = {}
-    placeholders = {
-        "㉠": "㉠에 들어갈 내용을 문장이나 구로 쓰세요.",
-        "㉡": "㉡에 들어갈 핵심 내용을 쓰세요.",
-        "㉢": "㉢에 들어갈 개념이나 결론을 쓰세요.",
-    }
     for col, blank in zip(cols, ["㉠", "㉡", "㉢"]):
         with col:
             answers[blank] = st.text_area(
                 f"{blank} 답안",
                 height=130,
-                placeholder=placeholders[blank],
-                key=f"{selected_set}_{blank}",
+                placeholder=f"{blank}에 들어갈 내용을 쓰세요.",
+                key=f"{selected_set}_{selected_type}_{blank}",
             )
 
     if st.button("채점하기", type="primary", use_container_width=True):
         total = 0
         st.markdown("### 채점 결과")
         for blank in ["㉠", "㉡", "㉢"]:
-            result = grade_q1_answer(answers[blank], config["q1"][blank])
+            result = grade_q1_answer(answers[blank], q["rules"][blank])
             total += result.score
-            render_answer_feedback(blank, result, config["q1"][blank]["model"])
+            render_result(blank, result, q["rules"][blank]["model"])
         st.metric("총점", f"{total:.0f} / 3")
 
-elif question_type.startswith("서·논술형 2"):
-    q = display["q2"]
-    render_question_header(q)
+elif selected_type.startswith("서·논술형 2"):
+    q = content["q2"]
+    st.markdown(f"## {q['title']}")
+    st.info(q["prompt"])
 
     with st.container(border=True):
         st.markdown("#### 🧩 주어진 첫 문장")
@@ -318,35 +829,34 @@ elif question_type.startswith("서·논술형 2"):
     render_conditions(q["conditions"])
     st.caption(f"💡 생각 도움: {q['hints']}")
 
-    with st.expander("설명 방법 6가지 빠르게 확인하기"):
+    with st.expander("설명 방법 6가지 확인하기"):
         st.table([
-            {"방법": "정의", "어떻게 쓰나요?": "대상의 뜻이나 개념을 밝힙니다.", "표지 예": "~란, ~을 말한다"},
-            {"방법": "예시", "어떻게 쓰나요?": "구체적인 사례를 듭니다.", "표지 예": "예를 들어, 가령"},
-            {"방법": "인과", "어떻게 쓰나요?": "원인과 결과를 연결합니다.", "표지 예": "~때문에, 따라서"},
-            {"방법": "분석", "어떻게 쓰나요?": "대상을 둘 이상의 요소로 나눕니다.", "표지 예": "~에는 A, B, C가 있다"},
-            {"방법": "비교와 대조", "어떻게 쓰나요?": "두 대상의 공통점이나 차이점을 밝힙니다.", "표지 예": "반면, ~와 달리"},
-            {"방법": "분류와 구분", "어떻게 쓰나요?": "기준에 따라 종류를 나눕니다.", "표지 예": "~에 따라 ~로 나뉜다"},
+            {"방법": "정의", "기준": "대상의 뜻이나 개념을 밝힘"},
+            {"방법": "예시", "기준": "구체적인 사례를 제시함"},
+            {"방법": "인과", "기준": "원인과 결과를 연결함"},
+            {"방법": "분석", "기준": "대상을 둘 이상의 요소로 나눔"},
+            {"방법": "비교와 대조", "기준": "두 대상의 공통점이나 차이점을 밝힘"},
+            {"방법": "분류와 구분", "기준": "기준에 따라 종류를 나눔"},
         ])
 
-    st.markdown("### 답안 작성")
     c1, c2 = st.columns(2)
     with c1:
         answer1 = st.text_area(
             "(1) 첫 번째 문장",
             height=165,
-            placeholder="지문의 내용을 활용해 한 문장을 쓰세요. 예: 문장 끝에 (비교와 대조)",
-            key=f"{selected_set}_q2_1",
+            placeholder="첫 번째 설명 방법을 사용해 문장을 쓰세요.",
+            key=f"{selected_set}_{selected_type}_1",
         )
     with c2:
         answer2 = st.text_area(
             "(2) 두 번째 문장",
             height=165,
-            placeholder="첫 문장과 다른 설명 방법으로 한 문장을 쓰세요.",
-            key=f"{selected_set}_q2_2",
+            placeholder="첫 문장과 다른 설명 방법으로 쓰세요.",
+            key=f"{selected_set}_{selected_type}_2",
         )
 
     if st.button("채점하기", type="primary", use_container_width=True):
-        result = grade_q2([answer1, answer2], config["q2"])
+        result = grade_q2(answer1, answer2, q)
         st.markdown("### 채점 결과")
         if result.passed:
             st.success(f"통과 ({result.score:.0f}/{result.max_score:.0f})")
@@ -355,17 +865,17 @@ elif question_type.startswith("서·논술형 2"):
         for reason in result.reasons:
             st.markdown(f"- {reason}")
 
-    st.divider()
-    with st.expander("선택 가능한 설명 방법 조합별 모범 답안 보기"):
-        for combo, models in config["q2"]["models"].items():
+    with st.expander("설명 방법 조합별 모범 답안 보기"):
+        for combo, models in q["models"].items():
             st.markdown(f"#### {combo}")
             st.markdown(f"**(1)** {models[0]}")
             st.markdown(f"**(2)** {models[1]}")
             st.divider()
 
 else:
-    q = display["q3"]
-    render_question_header(q)
+    q = content["q3"]
+    st.markdown(f"## {q['title']}")
+    st.info(q["prompt"])
 
     with st.container(border=True):
         st.markdown("#### 🎬 영상 기획안")
@@ -373,7 +883,6 @@ else:
 
     render_conditions(q["conditions"])
 
-    st.markdown("### 답안 작성")
     left, right = st.columns(2)
     with left:
         st.markdown("#### 👀 시각 요소")
@@ -381,43 +890,42 @@ else:
             "Ⓐ 화면에 무엇을 보여 줄까요?",
             height=125,
             placeholder="인물, 장소, 행동, 화면 분위기를 구체적으로 쓰세요.",
-            key=f"{selected_set}_visual_element",
+            key=f"{selected_set}_{selected_type}_ve",
         )
         visual_effect = st.text_area(
             "이 시각 요소는 어떤 내용을 전달하나요?",
             height=155,
             placeholder="앞에서 쓴 화면이 지문의 어떤 내용을 보여 주는지 설명하세요.",
-            key=f"{selected_set}_visual_effect",
+            key=f"{selected_set}_{selected_type}_vfx",
         )
+
     with right:
         st.markdown("#### 🔊 청각 요소")
         audio_element = st.text_area(
             "Ⓑ 어떤 소리를 들려줄까요?",
             height=125,
             placeholder="배경음악, 효과음, 목소리, 정적 등을 구체적으로 쓰세요.",
-            key=f"{selected_set}_audio_element",
+            key=f"{selected_set}_{selected_type}_ae",
         )
         audio_effect = st.text_area(
             "이 청각 요소는 어떤 내용을 전달하나요?",
             height=155,
             placeholder="앞에서 쓴 소리가 지문의 어떤 내용을 강조하는지 설명하세요.",
-            key=f"{selected_set}_audio_effect",
+            key=f"{selected_set}_{selected_type}_afx",
         )
 
     with st.expander("6점 배점 기준 확인하기"):
         st.table([
-            {"평가 요소": "시각 요소", "배점": 1, "확인 내용": "지문 핵심 특성을 화면으로 표현했는가"},
-            {"평가 요소": "시각 효과–요소 연결", "배점": 1, "확인 내용": "앞에서 쓴 화면과 효과 설명이 연결되는가"},
-            {"평가 요소": "시각 효과–본문 근거", "배점": 1, "확인 내용": "효과에 지문의 핵심 내용이 들어 있는가"},
-            {"평가 요소": "청각 요소", "배점": 1, "확인 내용": "지문 핵심 특성을 소리로 표현했는가"},
-            {"평가 요소": "청각 효과–요소 연결", "배점": 1, "확인 내용": "앞에서 쓴 소리와 효과 설명이 연결되는가"},
-            {"평가 요소": "청각 효과–본문 근거", "배점": 1, "확인 내용": "효과에 지문의 핵심 내용이 들어 있는가"},
+            {"평가 요소": "시각 요소", "배점": 1},
+            {"평가 요소": "시각 효과–요소 연결", "배점": 1},
+            {"평가 요소": "시각 효과–본문 근거", "배점": 1},
+            {"평가 요소": "청각 요소", "배점": 1},
+            {"평가 요소": "청각 효과–요소 연결", "배점": 1},
+            {"평가 요소": "청각 효과–본문 근거", "배점": 1},
         ])
 
     if st.button("채점하기", type="primary", use_container_width=True):
-        result = grade_q3(
-            visual_element, visual_effect, audio_element, audio_effect, config["q3"]
-        )
+        result = grade_q3(visual_element, visual_effect, audio_element, audio_effect, q)
         st.markdown("### 채점 결과")
         if result.passed:
             st.success(f"통과 ({result.score:.0f}/{result.max_score:.0f})")
@@ -427,43 +935,32 @@ else:
             st.markdown(f"- {reason}")
 
         with st.expander("모범 답안 확인하기"):
-            models = config["q3"]["models"]
+            models = q["models"]
             st.markdown(f"**시각 요소:** {models['시각 요소']}")
             st.markdown(f"**시각 효과:** {models['시각 효과']}")
             st.markdown(f"**청각 요소:** {models['청각 요소']}")
             st.markdown(f"**청각 효과:** {models['청각 효과']}")
 
 st.divider()
-st.caption(
-    "설계 원칙: 문제·지문·작성 조건을 화면에 함께 제시 / 의미 기반 동의어 허용 / "
-    "설명 방법 실제 구조 검증 / 다른 개념의 특성 전이 차단 / 요구 결론 방향 확인"
-)
+st.caption("규칙 기반 1차 채점 도구입니다. 새 동의어나 창의적 답안은 교사가 최종 확인해야 합니다.")
 '''
 
-new_code = head + marker + new_ui
-app_path.write_text(new_code, encoding="utf-8")
+requirements = "streamlit>=1.35,<2.0\n"
 
-# Syntax check
-compile(new_code, str(app_path), "exec")
+base = Path("/mnt/data/essay_grader_fixed")
+base.mkdir(exist_ok=True)
 
-# README update
-readme_path = Path("/mnt/data/essay_grader_streamlit/README.md")
-readme = readme_path.read_text(encoding="utf-8")
-readme += """
+app_path = base / "app.py"
+req_path = base / "requirements.txt"
+app_path.write_text(app_code, encoding="utf-8")
+req_path.write_text(requirements, encoding="utf-8")
 
-## 화면 개선 사항
+# 문법 검사
+ast.parse(app_code)
 
-- 각 세트의 읽을 글을 앱 화면에 함께 제시
-- 문항의 발문, 표, 첫 문장, 영상 기획안 표시
-- 학생이 무엇을 써야 하는지 답란별 안내 제공
-- 작성 조건과 설명 방법 도움말 제공
-- 모범 답안은 답안 작성 뒤 확인할 수 있도록 접기 영역으로 배치
-"""
-readme_path.write_text(readme, encoding="utf-8")
-
-zip_path = Path("/mnt/data/essay_grader_streamlit_ui_improved.zip")
+zip_path = Path("/mnt/data/essay_grader_fixed.zip")
 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-    for p in Path("/mnt/data/essay_grader_streamlit").iterdir():
-        z.write(p, arcname=p.name)
+    z.write(app_path, arcname="app.py")
+    z.write(req_path, arcname="requirements.txt")
 
 print(zip_path)
