@@ -266,6 +266,12 @@ SETS = {
 - 시각 요소: Ⓐ  
 - 청각 요소: Ⓑ
 """,
+            "conditions": [
+                "어려운 과제를 할 때 필요한 환경의 특성이 드러나야 함",
+                "시각 요소와 청각 요소를 각각 구체적으로 제시할 것",
+                "각 효과는 앞에서 쓴 요소와 직접 연결할 것",
+                "효과의 근거는 반드시 윗글의 내용에서 가져올 것",
+            ],
             "visual_element_groups": [
                 {"혼자", "한 학생", "개별적으로"},
                 {"집중", "연습", "반복", "틀린 문제", "다시 확인"},
@@ -400,6 +406,12 @@ SETS = {
 - 시각 요소: Ⓐ  
 - 청각 요소: Ⓑ
 """,
+            "conditions": [
+                "정전기가 높은 곳에 고여 있는 물과 같다는 특징이 드러나야 함",
+                "전하가 이동하지 않고 머무는 상태를 표현할 것",
+                "각 효과는 앞에서 쓴 요소와 직접 연결할 것",
+                "효과의 근거는 반드시 윗글의 내용에서 가져올 것",
+            ],
             "visual_element_groups": [{"높은 곳", "높은 절벽", "댐", "저수지", "높은 수조"}, {"고여", "흐르지 않", "떨어지지 않", "정지"}],
             "audio_element_groups": [{"정적", "무음", "고요", "잔잔", "거센 물소리 없음", "폭포 소리 제거"}],
             "visual_effect_groups": [{"전하"}, {"이동하지 않", "머물", "정지 상태"}, {"위험하지 않", "피해가 없", "전압이 높아도"}],
@@ -529,6 +541,12 @@ SETS = {
 - 시각 요소: Ⓐ  
 - 청각 요소: Ⓑ
 """,
+            "conditions": [
+                "인간 작품에 작가의 감정·철학·경험·관점·환경이 담긴다는 점이 드러나야 함",
+                "작품이 감상자에게 감동이나 울림을 줄 수 있다는 점을 활용할 수 있음",
+                "각 효과는 앞에서 쓴 요소와 직접 연결할 것",
+                "효과의 근거는 반드시 윗글의 내용에서 가져올 것",
+            ],
             "visual_element_groups": [{"화가", "작가", "인간"}, {"감정", "철학", "경험", "관점", "환경", "과거", "삶"}],
             "audio_element_groups": [{"독백", "내레이션", "붓질", "숨소리", "심장 박동", "감정적인 음악", "현악기"}],
             "visual_effect_groups": [{"작가", "화가", "인간"}, {"감정", "철학", "경험", "관점", "환경"}, {"감동", "마음을 울", "울림", "예술"}],
@@ -714,7 +732,7 @@ def render_question_button_bar(current_key: str, qdata: Dict) -> str:
         horizontal=True,
         label_visibility="collapsed",
         index=options.index(current_key),
-        key=f"question_nav_{st.session_state['current_set']}",
+        key=f"question_nav_{qdata['short']}",
     )
 
 
@@ -765,15 +783,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 상태 초기화
-if "current_set" not in st.session_state:
-    st.session_state["current_set"] = list(SETS.keys())[0]
+# 상단 세트 탭
+set_options = list(SETS.keys())
+selected_set = st.radio(
+    "세트 선택",
+    options=set_options,
+    horizontal=True,
+    format_func=lambda x: f"{SETS[x]['emoji']} {SETS[x]['short']}",
+    label_visibility="collapsed",
+    key="top_set_selector",
+)
+data = SETS[selected_set]
 
-# 사이드바
+# 사이드바: 현재 세트 표시 및 개념 길잡이
 with st.sidebar:
     st.markdown("## 📖 개념 길잡이")
-    current_sidebar_set = st.session_state["current_set"]
-    for box in SETS[current_sidebar_set]["guide_boxes"]:
+    st.success(f"현재 세트: {data['emoji']} {data['short']}")
+    st.caption("세트 변경은 화면 상단의 세트 탭에서 할 수 있습니다.")
+    st.divider()
+    for box in data["guide_boxes"]:
         with st.expander(box["title"], expanded=True):
             for item in box["items"]:
                 st.markdown(f"- {item}")
@@ -786,25 +814,15 @@ with st.sidebar:
                 unsafe_allow_html=True,
             )
 
-# 상단 세트 탭
-set_options = list(SETS.keys())
-selected_set = st.radio(
-    "세트 선택",
-    options=set_options,
-    horizontal=True,
-    format_func=lambda x: f"{SETS[x]['emoji']} {SETS[x]['short']}",
-    label_visibility="collapsed",
-    index=set_options.index(st.session_state["current_set"]),
-)
-st.session_state["current_set"] = selected_set
-data = SETS[selected_set]
-
 st.markdown(f"<div class='set-title'>💡 [실전 적용] {data['title']}</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='soft-panel'>{data['passage'].replace(chr(10), '<br>')}</div>", unsafe_allow_html=True)
 
 # 문항 탭
-question_key = render_question_button_bar("q1" if "current_question" not in st.session_state else st.session_state["current_question"], data)
-st.session_state["current_question"] = question_key
+question_state_key = f"current_question_{selected_set}"
+if question_state_key not in st.session_state:
+    st.session_state[question_state_key] = "q1"
+question_key = render_question_button_bar(st.session_state[question_state_key], data)
+st.session_state[question_state_key] = question_key
 
 st.divider()
 
